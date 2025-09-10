@@ -8,6 +8,38 @@ from transformers import BertModel, BertTokenizer
 from tqdm import tqdm
 
 
+
+# Add this helper function to both python scripts
+
+def convert_sat_to_act(sat_score: float) -> float:
+    """Converts an SAT score to an equivalent ACT score using a simplified concordance table."""
+    if sat_score == 0: return 0.0
+    # This is a simplified table. For a production system, use a more granular one.
+    concordance = {
+        1600: 36, 1560: 35, 1520: 34, 1490: 33, 1450: 32, 1420: 31, 1390: 30,
+        1360: 29, 1330: 28, 1300: 27, 1260: 26, 1230: 25, 1200: 24, 1160: 23,
+        1130: 22, 1100: 21, 1060: 20, 1030: 19, 990: 18, 960: 17, 920: 16, 900: 15,
+        880: 14, 850: 13, 820: 12, 800: 11, 780: 10, 750: 9, 720: 8, 700: 7, 650: 6, 600: 5, 550: 4, 500: 3, 400: 2, 300: 1, 200: 0
+    }
+    # Find the closest SAT score in the table and return its corresponding ACT score
+    closest_sat = min(concordance.keys(), key=lambda k: abs(k - sat_score))
+    return float(concordance[closest_sat])
+
+
+# You can create a reverse function as well if needed
+def convert_act_to_sat(act_score: float) -> float:
+    """Converts an ACT score to an equivalent SAT score."""
+    if act_score == 0: return 0.0
+    # Simplified reverse table
+    concordance = {
+        36: 1600, 35: 1560, 34: 1520, 33: 1490, 32: 1450, 31: 1420, 30: 1390,
+        29: 1360, 28: 1330, 27: 1300, 26: 1260, 25: 1230, 24: 1200, 23: 1160,
+        22: 1130, 21: 1100, 20: 1060, 19: 1030, 18: 990, 17: 960, 16: 920, 15: 900,
+        14: 880, 13: 850, 12: 820, 11: 800, 10: 780, 9: 750, 8: 720, 7: 700, 6: 650, 5: 600, 4: 550, 3: 500, 2: 400, 1: 300, 0: 200
+    }
+    closest_act = min(concordance.keys(), key=lambda k: abs(k - act_score))
+    return float(concordance[closest_act])
+
 # -------------------- Helpers --------------------
 
 def to_float(val, default=0.0) -> float:
@@ -210,7 +242,11 @@ def build_text(uni: Dict[str, Any]) -> str:
 
 
 def build_numeric_features(uni: Dict[str, Any]) -> List[float]:
-    """Extracts the 16 core numeric features for the MLP."""
+    """
+    Extracts the 16 core numeric features for the MLP, with logic to handle
+    missing SAT/ACT and GPA data through conversion and imputation.
+    """
+    # 1. Extract SAT and ACT scores
     sat25 = to_float(uni.get(K["sat25"], 0.0))
     sat50 = to_float(uni.get(K["sat50"], 0.0))
     sat75 = to_float(uni.get(K["sat75"], 0.0))
@@ -219,9 +255,26 @@ def build_numeric_features(uni: Dict[str, Any]) -> List[float]:
     act50 = to_float(uni.get(K["act50"], 0.0))
     act75 = to_float(uni.get(K["act75"], 0.0))
 
+    # 2. Apply concordance logic to fill missing scores
+    # If SAT is missing but ACT is present, estimate SAT from ACT
+    if sat50 == 0.0 and act50 > 0.0:
+        sat50 = convert_act_to_sat(act50)
+        # Estimate the 25th and 75th percentiles based on the new median
+        sat25 = sat50 - 40 
+        sat75 = sat50 + 40
+
+    # If ACT is missing but SAT is present, estimate ACT from SAT
+    if act50 == 0.0 and sat50 > 0.0:
+        act50 = convert_sat_to_act(sat50)
+        # Estimate the 25th and 75th percentiles
+        act25 = max(act50 - 1, 0) # Ensure it doesn't go below 0
+        act75 = min(act50 + 1, 36) # Ensure it doesn't go above 36
+
+    # 3. Extract fee and ratio
     fee = to_float(uni.get(K["fee"], 0.0))
     ratio = parse_ratio(uni.get(K["ratio"], None))
 
+    # 4. Extract GPA bins
     gpa_bins = [
         to_float(uni.get(K["gpa_375_up"], 0.0)),
         to_float(uni.get(K["gpa_350_374"], 0.0)),
@@ -233,6 +286,13 @@ def build_numeric_features(uni: Dict[str, Any]) -> List[float]:
         to_float(uni.get(K["gpa_below_10"], 0.0)),
     ]
 
+    # 5. Impute GPA data for top-tier schools if it's missing
+    if sum(gpa_bins) == 0.0 and sat50 > 1450:
+        # If all GPA bins are zero but it's a top SAT school,
+        # impute a high value for the top bin.
+        gpa_bins[0] = 90.0  # Assumes 90% of students have a GPA of 3.75+
+
+    # 6. Combine all features into the final list
     features = [sat25, sat50, sat75, act25, act50, act75, fee, ratio] + gpa_bins
     assert len(features) == 16, f"Expected 16 features, but got {len(features)}"
     return features
@@ -294,7 +354,9 @@ def process_universities(input_path: str, output_path: str, batch_size: int = 1)
 
     flush_batch() # Process any remaining items in the last batch
     writer.close()
+    torch.save(model.state_dict(), "university_embedder.pth")
     print(f"✅ Saved embeddings to {output_path}")
+    print(f"✅ Saved model weights to university_embedder.pth")
 
 
 # -------------------- Run --------------------

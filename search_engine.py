@@ -25,7 +25,7 @@ class UniversityEmbedder(nn.Module):
         # BERT
         self.bert = BertModel.from_pretrained(bert_model_name)
         self.tokenizer = BertTokenizer.from_pretrained(bert_model_name)
-        bert_output_dim = self.bert.config.hidden_size  # 768
+        bert_output_dim = self.bert.config.hidden_size  
 
         # Numeric MLP
         self.num_mlp = nn.Sequential(
@@ -99,10 +99,62 @@ def gpa_to_bins(gpa: float):
     return bins
 
 
+# Add this helper function to both python scripts
+
+def convert_sat_to_act(sat_score: float) -> float:
+    """Converts an SAT score to an equivalent ACT score using a simplified concordance table."""
+    if sat_score == 0: return 0.0
+    # This is a simplified table. For a production system, use a more granular one.
+    concordance = {
+        1600: 36, 1560: 35, 1520: 34, 1490: 33, 1450: 32, 1420: 31, 1390: 30,
+        1360: 29, 1330: 28, 1300: 27, 1260: 26, 1230: 25, 1200: 24, 1160: 23,
+        1130: 22, 1100: 21, 1060: 20, 1030: 19, 990: 18, 960: 17, 920: 16, 900: 15,
+        880: 14, 850: 13, 820: 12, 800: 11, 780: 10, 750: 9, 720: 8, 700: 7, 650: 6, 600: 5, 550: 4, 500: 3, 400: 2, 300: 1, 200: 0
+    }
+    # Find the closest SAT score in the table and return its corresponding ACT score
+    closest_sat = min(concordance.keys(), key=lambda k: abs(k - sat_score))
+    return float(concordance[closest_sat])
+
+# You can create a reverse function as well if needed
+def convert_act_to_sat(act_score: float) -> float:
+    """Converts an ACT score to an equivalent SAT score."""
+    if act_score == 0: return 0.0
+    # Simplified reverse table
+    concordance = {
+        36: 1600, 35: 1560, 34: 1520, 33: 1490, 32: 1450, 31: 1420, 30: 1390,
+        29: 1360, 28: 1330, 27: 1300, 26: 1260, 25: 1230, 24: 1200, 23: 1160,
+        22: 1130, 21: 1100, 20: 1060, 19: 1030, 18: 990, 17: 960, 16: 920, 15: 900,
+        14: 880, 13: 850, 12: 820, 11: 800, 10: 780, 9: 750, 8: 720, 7: 700, 6: 650, 5: 600, 4: 550, 3: 500, 2: 400, 1: 300, 0: 200
+    }
+    closest_act = min(concordance.keys(), key=lambda k: abs(k - act_score))
+    return float(concordance[closest_act])
+
 # -------------------- Vectorize User Query (with debug) --------------------
+# In search_engine.py
+
+# (Make sure the convert_sat_to_act and convert_act_to_sat helper functions are also in this file)
+
 def vectorize_user_query(model, gpa: float, sat: float = None, act: float = None, text: str = "", debug=False):
-    sat_vec = [sat, sat, sat] if sat is not None else [0.0, 0.0, 0.0]
-    act_vec = [act, act, act] if act is not None else [0.0, 0.0, 0.0]
+    # --- FIX IS HERE ---
+    # Convert potential None values to 0.0 immediately.
+    # This prevents the TypeError.
+    user_sat = sat if sat is not None else 0.0
+    user_act = act if act is not None else 0.0
+
+    # Apply concordance logic to fill the missing test score
+    if user_sat > 0.0 and user_act == 0.0:
+        user_act = convert_sat_to_act(user_sat)
+    elif user_act > 0.0 and user_sat == 0.0:
+        user_sat = convert_act_to_sat(user_act)
+        
+    # Create a synthetic score range for more robust comparison
+    sat_spread = 30
+    act_spread = 1
+    
+    # This logic is now safe because user_sat and user_act are guaranteed to be numbers
+    sat_vec = [user_sat - sat_spread, user_sat, user_sat + sat_spread] if user_sat > 0 else [0.0, 0.0, 0.0]
+    act_vec = [user_act - act_spread, user_act, user_act + act_spread] if user_act > 0 else [0.0, 0.0, 0.0]
+
     fee = [0.0]
     ratio = [0.0]
     gpa_bins = gpa_to_bins(gpa)
@@ -115,7 +167,7 @@ def vectorize_user_query(model, gpa: float, sat: float = None, act: float = None
     with torch.no_grad():
         user_vec = model(text_fields, features).cpu().numpy()
 
-    # 🔑 Normalize query for cosine similarity
+    # Normalize query for cosine similarity
     faiss.normalize_L2(user_vec)
 
     if debug:
@@ -204,6 +256,7 @@ if __name__ == "__main__":
 
     # Load model
     model = UniversityEmbedder()
+    model.load_state_dict(torch.load("university_embedder.pth"))
     model.eval()
 
     # --- [NEW] Load the full JSON data to display details later ---
